@@ -1,12 +1,11 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"gorpc"
-	"gorpc/codec"
 	"log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -25,24 +24,23 @@ func main() {
 	addr := make(chan string)
 	go startServer(addr)
 
-	conn, _ := net.Dial("tcp", <-addr)
-	defer func() { _ = conn.Close() }()
+	client, _ := gorpc.Dial("tcp", <-addr)
+	defer func() { _ = client.Close() }()
 	time.Sleep(time.Second)
 
-	// send options
-	_ = json.NewEncoder(conn).Encode(gorpc.DefaultOption)
-	cc := codec.NewGobCodec(conn)
-
 	// send request & receive response
+	var wg sync.WaitGroup
 	for i := 0; i < 5; i++ {
-		header := &codec.Header{
-			ServiceMethod: "Foo.Sum",
-			Seq:           uint64(i),
-		}
-		_ = cc.Write(header, fmt.Sprintf("gorpc req %d", header.Seq))
-		_ = cc.ReadHeader(header)
-		var reply string
-		_ = cc.ReadBody(&reply)
-		log.Println("reply:", reply)
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			args := fmt.Sprintf("gorpc req %d", i)
+			var reply string
+			if err := client.Call("Foo.Sum", args, &reply); err != nil {
+				log.Fatal("call Foo.Sum error:", err)
+			}
+			log.Println("reply:", reply)
+		}(i)
+		wg.Wait()
 	}
 }
