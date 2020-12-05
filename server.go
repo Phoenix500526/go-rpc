@@ -2,12 +2,13 @@ package gorpc
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"gorpc/codec"
 	"io"
 	"log"
 	"net"
 	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -24,7 +25,9 @@ var DefaultOption = &Option{
 }
 
 // RPC Server
-type Server struct{}
+type Server struct {
+	serviceMap sync.Map
+}
 
 // invalidRequest is a placeholder for response argv when error
 var invalidRequest = struct{}{}
@@ -34,6 +37,8 @@ type request struct {
 	header *codec.Header
 	argv   reflect.Value
 	replyv reflect.Value
+	mtype  *methodType
+	svc    *service
 }
 
 func NewServer() *Server {
@@ -107,9 +112,22 @@ func (s *Server) readRequest(c codec.Codec) (*request, error) {
 		return nil, err
 	}
 	req := &request{header: header}
-	req.argv = reflect.New(reflect.TypeOf(""))
-	if err = c.ReadBody(req.argv.Interface()); err != nil {
-		log.Println("rpc server: read argv err:", err)
+	req.svc, req.mtype, err = s.findService(header.ServiceMethod)
+	if err != nil {
+		return req, err
+	}
+	req.argv = req.mtype.newArgv()
+	req.replyv = req.mtype.newReplyv()
+
+	// make sure that argvi is a pointer, ReadBody receive a pointer parameter
+	argvi := req.argv.Interface()
+	if req.argv.Type().Kind() != reflect.Ptr {
+		argvi = req.argv.Addr().Interface()
+	}
+
+	if err = c.ReadBody(argvi); err != nil {
+		log.Println("rpc server: read body err:", err)
+		return req, err
 	}
 	return req, nil
 }
@@ -124,11 +142,55 @@ func (s *Server) sendResponse(c codec.Codec, h *codec.Header, body interface{}, 
 
 func (s *Server) handleRequest(c codec.Codec, req *request, sending *sync.Mutex, wg *sync.WaitGroup) {
 	defer wg.Done()
-	log.Println(req.header, req.argv.Elem())
-	req.replyv = reflect.ValueOf(fmt.Sprintf("gorpc resp %d", req.header.Seq))
+	err := req.svc.call(req.mtype, req.argv, req.replyv)
+	if err != nil {
+		req.header.Error = err.Error()
+		s.sendResponse(c, req.header, invalidRequest, sending)
+		return
+	}
 	s.sendResponse(c, req.header, req.replyv.Interface(), sending)
+
+}
+
+func (s *Server) findService(serviceMethod string) (svc *service, mtype *methodType, err error) {
+	dot := strings.LastIndex(serviceMethod, ".")
+	if dot < 0 {
+		err = errors.New("rpc server: service/method request ill-formed: " + serviceMethod)
+		return
+	}
+	serviceName, methodName := serviceMethod[:dot], serviceMethod[dot+1:]
+	svci, ok := s.serviceMap.Load(serviceName)
+	if !ok {
+		err = errors.New("rpc server: can't find service " + serviceName)
+		return
+	}
+	svc = svci.(*service)
+	mtype = svc.method[methodName]
+	if mtype == nil {
+		err = errors.New("rpc server: can't find method " + methodName)
+	}
+	return
 }
 
 var DefaultServer = NewServer()
 
 func Accept(lis net.Listener) { DefaultServer.Accept(lis) }
+
+// Register publishes in the server the set of methods of the
+// receiver value that satisfy the following conditions:
+// 	-exported method of exported type
+//	- two arguments, both of exported type
+//	- the second argument is a pointer
+//	- one return value, of type error
+func (server *Server) Register(rcvr interface{}) error {
+	s := newService(rcvr)
+	if _, dup := server.serviceMap.LoadOrStore(s.name, s); dup {
+		return errors.New("rpc: service already defined: " + s.name)
+	}
+	return nil
+}
+
+// Register publishes the receiver's methods in the DefaultServer
+func Register(rcvr interface{}) error {
+	return DefaultServer.Register(rcvr)
+}
