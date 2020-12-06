@@ -43,9 +43,9 @@ func (m *methodType) newReplyv() reflect.Value {
 
 type service struct {
 	name   string
-	type_  reflect.Type
-	rcvr   reflect.Value
-	method map[string]*methodType
+	type_  reflect.Type           //service's type
+	rcvr   reflect.Value          //service instance
+	method map[string]*methodType // service's method table
 }
 
 func newService(rcvr interface{}) *service {
